@@ -8,56 +8,74 @@ addpath(genpath('./subroutines/'));
 mkdir('./output_images');
 mkdir('./output_masks');
 mkdir('./output_rgbout');
-load('.\trained_vgg19_model\new_zhongshan_vgg19_model_1.mat');
+load('.\trained_vgg19_model\vgg19_model.mat');
 
+% Define color map for tissue classes in RGB format (Gray, Cyan, Orange, Blue, Magenta, Yellow, Green, Red) 
 colors = [ 192, 192, 192; 0, 255, 255; 255, 165, 0; 0, 0, 255; 255, 0, 255; 255, 255, 0; ...
-    0, 255, 0; 255, 0, 0]/255;%»ÒÇà³ÈÀ¶×Ï»ÆÂÌºì
+    0, 255, 0; 255, 0, 0]/255;
 
 tissuenames = {'ADI','BACK','INT','LYM','MUS','NORM','STR','TUM'};
-border = [76 76]; % borderÊÇ patch ÖØµþµÄ±ßÔµ
+border = [76 76];% Overlap border between patches
 
-deploy_dataPath = 'E:\HWH\PAAD_proj\PAADNEW_zhongshan\new_zhongshan_87\';
+% Path to whole slide images and annotations 
+deploy_dataPath = './data/';
 allFiles = dir([deploy_dataPath,'*.svs']);
+datxml = './data/sedeen/';
 
 layerNum = numel(myNet.Layers);
 bsize = myNet.Layers(1).InputSize; 
-bsize = bsize(1:2)-2*border; % bsizeÊÇ²»ÖØµþ¶ÁÈ¡Ê±ºòµÄpatch±ß³¤£¬Îª72
-rmov = ceil(border(1)/bsize(1));   %ceil£¨£©ÏòÉÏÈ¡Õû
+bsize = bsize(1:2)-2*border; 
+rmov = ceil(border(1)/bsize(1));  
 
+% Process each whole slide image
 for i = 1:numel(allFiles) 
     tic
-    if exist(['E:\HWH\PAAD_proj\PAAD_TCGA\output_masks\mask_out', '_', allFiles(i).name(1:end-4), '.mat'], 'file')
-        continue;
-    end
+     if exist(['.\output_masks\mask_out', '_', allFiles(i).name(1:end-4), '.mat'], 'file')
+         continue;
+     end
     currFilePath = [deploy_dataPath, allFiles(i).name];
     slidePtr = openslide_open(currFilePath);
-    [mppX, mppY, width, height] = openslide_get_slide_properties_1(slidePtr);
 
-    ind = floor(2000/bsize(1));
-   
+    % Check if annotation exists for region selection
+    if exist([datxml,  allFiles(i).name(1:end-4),'.session.xml'])
+        xmlout = parseXML([datxml,  allFiles(i).name(1:end-4),'.session.xml']);
+        [x1,x2,y1,y2] = read_xml(xmlout);
+        judge=1;
+        width=x2-x1;
+        height=y2-y1;
+        [mppX, mppY, width1, height1] = openslide_get_slide_properties(slidePtr);
+    else
+        judge=0;
+        x1=0;y1=0;
+        x2=0;y2=0;
+        [mppX, mppY, width, height] = openslide_get_slide_properties(slidePtr);
+    end
+    imsetsize=1000;
+    ind = floor(imsetsize/bsize(1));
     max_col = floor(double(width) / ((ind - 3) * bsize(1)));
     max_row = floor(double(height) / ((ind - 3) * bsize(1)));
-    nPat = (max_col-1) * (max_row-1);  %Ò»¹²ÓÐ nPat ¸ö 2000¡Á2000 µÄpatch
+    nPat = (max_col-1) * (max_row-1);  
     
     mask_total = cell(1, nPat);
-    bar = waitbar(0, '¶ÁÈ¡Êý¾ÝÖÐ');
+    bar = waitbar(0, 'Loading data...');
     count1 = 0;
-  
+
+    % Process each tile in the grid
     for row = 1:max_row-1 
         for col = 1:max_col-1 
             
-            %¶ÁÌõÓÃ
+             % Update progress bar
             count1 = count1 + 1;
-            str = ['¼ÆËãÖÐ...', num2str(count1/nPat*100), '%'];
+            str = ['Processing...', num2str(count1/nPat*100), '%'];
             waitbar(count1/nPat, bar, str);
             
-            subheight = 2000;
-            subwidth = 2000;
+            subheight = imsetsize;
+            subwidth = imsetsize;
             left = rmov;
             right1 = ind-rmov;
             right2 = ind-rmov;
             
-           %% ·ÀÖ¹³¬¹ý±ß½ç
+            %% Handle boundary cases
             if col == max_col - 1 && row ~= max_row - 1
                 
                 subwidth = width - ((ind - 3) * bsize(1)) * (max_col - 2);    
@@ -73,10 +91,35 @@ for i = 1:numel(allFiles)
                 right1 = floor(double(subheight)/bsize(1))-rmov;
                 right2 = floor(double(subwidth)/bsize(1))-rmov;
             end
-           %%
-            result = openslide_read_region_1(slidePtr, (col-1) * ((ind - 3) * bsize(1)), (row-1) * ((ind - 3) * bsize(1)),...
-                subwidth, subheight, 0);
-            
+           %% Calculate tile coordinates
+            x=x1+(col-1) * ((ind - 3) * bsize(1));
+            y=y1+(row-1) * ((ind - 3) * bsize(1));
+            if x<0 
+                x=0;
+            end
+            if y<0 
+                y=0;
+            end
+            if x+subwidth>width1
+                x=width1-subwidth;
+            end
+            if y+subheight>height1
+                y=height1-subheight;
+            end
+            % Read region from whole slide image
+            result = openslide_read_region(slidePtr, x, y, subwidth, subheight, 0);
+            % Check if center point is within ROI polygon
+            if judge
+                judge1 = judge_point(x+(imsetsize/2),y+(imsetsize/2),xmlout);
+                if judge1
+                result = result(: ,:, 2:4);
+                else 
+                result = result(: ,:, 2:4);
+                result = zeros(size(result));
+                end
+            else
+                result = result(: ,:, 2:4);
+            end
             count2 = 0;
             imgset = [];
             for p = left:right1
@@ -89,14 +132,14 @@ for i = 1:numel(allFiles)
                        result(:, subwidth+1:(right2+1)*bsize(1)+border(1), :) = 0;
                     end
                     imgset(:, :, :, count2) = result(p*bsize(1)-border(1)+1:(p+1)*bsize(1)+border(1), q*bsize(1)-border(1)+1:(q+1)*bsize(1)+border(1), :); 
-                    % bsize¼ÓÉÏborderÖØµþµÄ±ßÔµµÄÁ½±¶¾ÍÊÇÌáÈ¡³öÀ´µÄpatchµÄ´óÐ¡£¨72+76*2=224£©
+                    % Extract patch with overlap border ï¼ˆ72+76*2=224ï¼‰
                 end
             end
 
-            [labels, score] = classify(myNet, imgset); %2000¡Á2000µÄpatch£¨·Ö³É count2 ¸öÓÐÖØµþµÄ 224¡Á224Ð¡patch£©×÷ÎªÒ»¸ö imgset
+            % Perform classification on patch batch
+            [labels, score] = classify(myNet, imgset); 
             
             mid1 = zeros((right1-1)*(right2-1), 1, 8);
-            
             mid3 = zeros(right1-1, right2-1, 8);
             for j = 1:8
                 mid1(:, :, j) = score(:, j);
@@ -108,7 +151,7 @@ for i = 1:numel(allFiles)
             mask_total{count1} = mid3;
         end
     end
-   
+    % Reconstruct full slide mask
     mask = cell(max_row-1, max_col-1);
     count = 0;
     for m = 1:max_row-1
@@ -117,7 +160,7 @@ for i = 1:numel(allFiles)
             mask{m, n} = mask_total{count};
         end
     end
-    mask_out = cell2mat(mask);
+       mask_out = cell2mat(mask);
     [rgbout, currstats] = mask8toRGB(mask_out, colors);
     
     allstats(i,:) = currstats(:);
@@ -133,7 +176,7 @@ end
 statstable = [array2table(allnames', 'VariableNames' ,{'ID'}),...
     array2table(allstats, 'VariableNames', tissuenames)];
 
-writetable(statstable,'new_zhongshan_87_ResultsTable.xlsx');
+writetable(statstable,'ResultsTable.xlsx');
 
 openslide_close(slidePtr)
 clear slidePtr;
