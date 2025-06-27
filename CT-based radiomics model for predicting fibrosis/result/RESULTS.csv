@@ -1,0 +1,3 @@
+Patient_ID,Prediction,Confidence,Low_Fibrosis_Probability,High_Fibrosis_Probability
+1,Low Fibrosis,93.4,0.934,0.066
+2,High Fibrosis,94.44,0.0556,0.9444
